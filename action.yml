@@ -1,0 +1,141 @@
+name: "Cache APT Packages"
+description: "Install APT based packages and cache them for future runs."
+author: awalsh128
+branding:
+  icon: "hard-drive"
+  color: "green"
+inputs:
+  packages:
+    description: "Space delimited list of packages to install. Version can be specified optionally using APT command syntax of <name>=<version> (e.g. xdot=1.2-2)."
+    required: true
+    default: ""
+  version:
+    description: "Version of cache to load. Each version will have its own cache. Note, all characters except spaces are allowed."
+    required: false
+    default: ""
+  execute_install_scripts:
+    description: "Execute Debian package pre and post install script upon restore. See README.md caveats for more information."
+    required: false
+    default: "false"
+  empty_packages_behavior:
+    description: >
+      Desired behavior when the provided package list is empty.
+
+      Available Options:
+
+        error: Fail the action with an error message
+        warn: Output a warning without failing the action
+        ignore: Proceed silently without warnings or errors
+    required: false
+    default: "error"
+  refresh:
+    description: "OBSOLETE: Refresh is not used by the action, use version instead."
+    deprecationMessage: "Refresh is not used by the action, use version instead."
+  debug:
+    description: "Enable debugging when there are issues with action. Minor performance penalty."
+    required: false
+    default: "false"
+  add-repository:
+    description: "Space delimited list of repositories to add via apt-add-repository before installing packages. Supports PPA (ppa:user/repo) and other repository formats."
+    required: false
+    default: ""
+outputs:
+  cache-hit:
+    description: "A boolean value to indicate a cache was found for the packages requested."
+    # This compound expression is needed because lhs can be empty.
+    # Need to output true and false instead of true and nothing.
+    value: ${{ steps.load-cache.outputs.cache-hit || false }}
+  package-version-list:
+    description: "The main requested packages and versions that are installed. Represented as a comma delimited list with equals delimit on the package version (i.e. <package>:<version,<package>:<version>)."
+    value: ${{ steps.post-cache.outputs.package-version-list }}
+  all-package-version-list:
+    description: "All the pulled in packages and versions, including dependencies, that are installed. Represented as a comma delimited list with equals delimit on the package version (i.e. <package>:<version,<package>:<version>)."
+    value: ${{ steps.post-cache.outputs.all-package-version-list }}
+runs:
+  using: "composite"
+  steps:
+    - name: Chainguard usage telemetry
+      shell: bash
+      run: |
+        # Best-effort, fails open. Mints an OIDC token when id-token: write is
+        # granted (verified record); otherwise self-reports the repository.
+        tok=""
+        if [ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ] && [ -n "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" ]; then
+          tok=$(curl -sf --max-time 2 \
+            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=actions.chainguard.dev" \
+            | sed -n 's/.*"value":"\([^"]*\)".*/\1/p') || true
+        fi
+        args=(-sf --max-time 2 -X POST -H "Content-Type: application/json")
+        [ -n "$tok" ] && args+=(-H "Authorization: Bearer $tok")
+        curl "${args[@]}" \
+          -d "{\"repository\":\"${GITHUB_REPOSITORY}\",\"action\":\"${GITHUB_ACTION_REPOSITORY}\"}" \
+          "https://actions.enforce.dev/actions/v1/record" >/dev/null 2>&1 || true
+    - id: pre-cache
+      run: |
+        ${GITHUB_ACTION_PATH}/pre_cache_action.sh \
+          ~/cache-apt-pkgs \
+          "$VERSION" \
+          "$EXEC_INSTALL_SCRIPTS" \
+          "$DEBUG" \
+          "$ADD_REPOSITORY" \
+          "$PACKAGES"
+        if [ -f ~/cache-apt-pkgs/cache_key.md5 ]; then
+          safe_cache_key=$(printf '%s' "$(cat ~/cache-apt-pkgs/cache_key.md5)" | tr -d '\n\r')
+          echo "CACHE_KEY=${safe_cache_key}" >> "$GITHUB_ENV"
+        else
+          echo "CACHE_KEY=" >> "$GITHUB_ENV"
+        fi
+      shell: bash
+      env:
+        VERSION: "${{ inputs.version }}"
+        EXEC_INSTALL_SCRIPTS: "${{ inputs.execute_install_scripts }}"
+        EMPTY_PACKAGES_BEHAVIOR: "${{ inputs.empty_packages_behavior }}"
+        DEBUG: "${{ inputs.debug }}"
+        ADD_REPOSITORY: "${{ inputs.add-repository }}"
+        PACKAGES: "${{ inputs.packages }}"
+    - id: load-cache
+      if: ${{ env.CACHE_KEY }}
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/cache-apt-pkgs
+        key: cache-apt-pkgs_${{ env.CACHE_KEY }}
+    - id: post-cache
+      if: ${{ env.CACHE_KEY }}
+      run: |
+        ${GITHUB_ACTION_PATH}/post_cache_action.sh \
+          ~/cache-apt-pkgs \
+          / \
+          "$CACHE_HIT" \
+          "$EXEC_INSTALL_SCRIPTS" \
+          "$DEBUG" \
+          "$ADD_REPOSITORY" \
+          "$PACKAGES"
+        function create_list { local list=$(cat ~/cache-apt-pkgs/manifest_${1}.log | tr '\n' ','); echo ${list:0:-1}; };
+        safe_pkg_list=$(printf '%s' "$(create_list main)" | tr -d '\n\r')
+        safe_all_pkg_list=$(printf '%s' "$(create_list all)" | tr -d '\n\r')
+        echo "package-version-list=${safe_pkg_list}" >> "$GITHUB_OUTPUT"
+        echo "all-package-version-list=${safe_all_pkg_list}" >> "$GITHUB_OUTPUT"
+      shell: bash
+      env:
+        CACHE_HIT: "${{ steps.load-cache.outputs.cache-hit }}"
+        EXEC_INSTALL_SCRIPTS: "${{ inputs.execute_install_scripts }}"
+        DEBUG: "${{ inputs.debug }}"
+        ADD_REPOSITORY: "${{ inputs.add-repository }}"
+        PACKAGES: "${{ inputs.packages }}"
+    - id: upload-logs
+      if: ${{ env.CACHE_KEY && inputs.debug == 'true' }}
+      uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+      with:
+        name: cache-apt-pkgs-logs_${{ env.CACHE_KEY }}
+        path: ~/cache-apt-pkgs/*.log
+    - id: save-cache
+      if: ${{ env.CACHE_KEY && ! steps.load-cache.outputs.cache-hit }}
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/cache-apt-pkgs
+        key: ${{ steps.load-cache.outputs.cache-primary-key }}
+    - id: clean-cache
+      run: |
+        rm -rf ~/cache-apt-pkgs
+      shell: bash

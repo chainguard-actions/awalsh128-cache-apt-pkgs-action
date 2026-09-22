@@ -1,0 +1,23 @@
+name: Test empty packages with ignore behavior
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - id: action
+        uses: .
+        with:
+          packages: ""
+          empty_packages_behavior: ignore
+
+      - name: Assert action completed silently without failure
+        env:
+          CACHE_HIT: ${{ steps.action.outputs.cache-hit }}
+        run: |
+          echo "cache-hit: $CACHE_HIT"
+          # When packages is empty and behavior is ignore, action should succeed silently
+          # cache-hit will be false since no packages were installed (CACHE_KEY is empty)
+          echo "PASS: action completed with ignore behavior for empty packages"

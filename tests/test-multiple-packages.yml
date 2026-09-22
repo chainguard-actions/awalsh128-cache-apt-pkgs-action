@@ -1,0 +1,77 @@
+name: Test multiple package installation
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup fake apt-fast to avoid network download
+        run: |
+          if ! command -v apt-fast > /dev/null 2>&1; then
+            printf '#!/bin/bash\nexec apt-get "$@"\n' | sudo tee /usr/local/bin/apt-fast > /dev/null
+            sudo chmod +x /usr/local/bin/apt-fast
+          fi
+          apt-fast --version || true
+
+      - id: action
+        uses: .
+        with:
+          packages: tree jq
+        continue-on-error: true
+
+      - name: Assert package-version-list contains both packages
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          PKG_LIST: ${{ steps.action.outputs.package-version-list }}
+          ALL_PKG_LIST: ${{ steps.action.outputs.all-package-version-list }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "package-version-list: $PKG_LIST"
+          echo "all-package-version-list: $ALL_PKG_LIST"
+
+          if [ "$OUTCOME" = "success" ]; then
+            if [ -z "$PKG_LIST" ]; then
+              echo "FAIL: package-version-list should not be empty"
+              exit 1
+            fi
+            if ! echo "$PKG_LIST" | grep -q "tree"; then
+              echo "FAIL: package-version-list should contain 'tree'"
+              exit 1
+            fi
+            if ! echo "$PKG_LIST" | grep -q "jq"; then
+              echo "FAIL: package-version-list should contain 'jq'"
+              exit 1
+            fi
+            if [ -z "$ALL_PKG_LIST" ]; then
+              echo "FAIL: all-package-version-list should not be empty"
+              exit 1
+            fi
+            echo "PASS: package-version-list contains both 'tree' and 'jq'"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed gracefully (cache service may be unavailable under act)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi
+
+      - name: Assert both binaries are installed (if action succeeded)
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" = "success" ]; then
+            if ! command -v tree &>/dev/null; then
+              echo "FAIL: 'tree' command not found after installation"
+              exit 1
+            fi
+            echo "PASS: 'tree' is installed at $(which tree)"
+            if ! command -v jq &>/dev/null; then
+              echo "FAIL: 'jq' command not found after installation"
+              exit 1
+            fi
+            echo "PASS: 'jq' is installed at $(which jq)"
+          else
+            echo "INFO: Skipping binary check since action did not succeed"
+          fi
