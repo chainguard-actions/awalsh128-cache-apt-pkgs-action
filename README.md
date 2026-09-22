@@ -1,1 +1,15 @@
-# awalsh128-cache-apt-pkgs-action
+# awalsh128/cache-apt-pkgs-action
+
+Install APT based packages and cache them for future runs.
+
+Hardened by [Chainguard](https://www.chainguard.dev) from the upstream action at [https://github.com/awalsh128/cache-apt-pkgs-action](https://github.com/awalsh128/cache-apt-pkgs-action).
+
+## Versions
+
+| Version | Tag | Upstream commit |
+|---------|-----|-----------------|
+| v1.6.3 | [`v1.6.3`](https://github.com/chainguard-actions/awalsh128-cache-apt-pkgs-action/tree/v1.6.3) | [`553a35b`](https://github.com/awalsh128/cache-apt-pkgs-action/commit/553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9) |
+
+## Privacy
+
+This Action contacts Chainguard's licensing server to verify authorization. Connection metadata (IP address, GitHub repository identifier, timestamp, and any metadata encoded in the auth token) is transmitted to Chainguard, Inc. even if authorization is denied in accordance with our [Privacy Notice](https://www.chainguard.dev/legal/privacy-notice)
