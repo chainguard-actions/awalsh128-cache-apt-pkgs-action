@@ -96,7 +96,7 @@ runs:
         PACKAGES: "${{ inputs.packages }}"
     - id: load-cache
       if: ${{ env.CACHE_KEY }}
-      uses: chainguard-actions/actions-cache/restore@38c9e2f39b3b539d2c7bdb22ccc9cb381ee084b7 # v6.1.0
+      uses: chainguard-actions/actions-cache/restore@244dfed44d8c4e917b332280fb2c1063eda3d9be # v6.1.0
       with:
         path: ~/cache-apt-pkgs
         key: cache-apt-pkgs_${{ env.CACHE_KEY }}
@@ -131,7 +131,7 @@ runs:
         path: ~/cache-apt-pkgs/*.log
     - id: save-cache
       if: ${{ env.CACHE_KEY && ! steps.load-cache.outputs.cache-hit }}
-      uses: chainguard-actions/actions-cache/save@38c9e2f39b3b539d2c7bdb22ccc9cb381ee084b7 # v6.1.0
+      uses: chainguard-actions/actions-cache/save@244dfed44d8c4e917b332280fb2c1063eda3d9be # v6.1.0
       with:
         path: ~/cache-apt-pkgs
         key: ${{ steps.load-cache.outputs.cache-primary-key }}
