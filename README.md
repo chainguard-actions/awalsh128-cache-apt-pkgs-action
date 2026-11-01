@@ -6,9 +6,9 @@ Hardened by [Chainguard](https://www.chainguard.dev) from the upstream action at
 
 ## Versions
 
-| Version | Tag | Upstream commit |
-|---------|-----|-----------------|
-| v1.6.3 | [`v1.6.3`](https://github.com/chainguard-actions/awalsh128-cache-apt-pkgs-action/tree/v1.6.3) | [`553a35b`](https://github.com/awalsh128/cache-apt-pkgs-action/commit/553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9) |
+| Version | Tag | Upstream commit | Hardening report |
+|---------|-----|-----------------|------------------|
+| v1.6.3 | [`v1.6.3`](https://github.com/chainguard-actions/awalsh128-cache-apt-pkgs-action/tree/v1.6.3) | [`553a35b`](https://github.com/awalsh128/cache-apt-pkgs-action/commit/553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9) | [`HARDENING.md`](https://github.com/chainguard-actions/awalsh128-cache-apt-pkgs-action/blob/v1.6.3/HARDENING.md) |
 
 ## Privacy
 
