@@ -1,0 +1,73 @@
+name: Test basic single package install
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Build action bundle from its own source (dist is not committed at this tag)
+        run: |
+          if [ -f dist/action/index.js ]; then
+            echo "dist/action/index.js already present"
+            exit 0
+          fi
+          npm ci --ignore-scripts --no-audit --no-fund
+          npx tsc -p tsconfig.build.json
+          npx rollup -c rollup.config.mjs
+          test -f dist/action/index.js || { echo "FAIL: bundle not produced"; exit 1; }
+      - name: Pre-install aria2 (the action's apt backend expects it; the act image lacks it)
+        run: |
+          SUDO=""
+          if [ "$(id -u)" != "0" ]; then SUDO="sudo"; fi
+          if ! dpkg-query -W aria2 >/dev/null 2>&1; then
+            $SUDO apt-get update -y
+            $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends aria2
+          fi
+          dpkg-query -W aria2
+      - name: Ensure a cache service URL is advertised (act runs without one)
+        run: |
+          # @actions/cache isFeatureAvailable() only checks ACTIONS_CACHE_URL is set.
+          # Under act it is unset, so the action refuses to save. Keep any real value;
+          # otherwise point at an unreachable endpoint so restore/save fail softly
+          # (the cache library downgrades those errors to warnings).
+          if [ -z "${ACTIONS_CACHE_URL:-}" ]; then
+            echo "ACTIONS_CACHE_URL=http://127.0.0.1:1/" >> "$GITHUB_ENV"
+          fi
+          if [ -z "${ACTIONS_RUNTIME_TOKEN:-}" ]; then
+            echo "ACTIONS_RUNTIME_TOKEN=act-placeholder" >> "$GITHUB_ENV"
+          fi
+      - id: action
+        uses: .
+        with:
+          packages: tree
+      - name: Assert outputs
+        env:
+          CACHE_HIT: ${{ steps.action.outputs.cache-hit }}
+          PKGS: ${{ steps.action.outputs.package-version-list }}
+          ALL_PKGS: ${{ steps.action.outputs.all-package-version-list }}
+        run: |
+          echo "cache-hit: $CACHE_HIT"
+          echo "package-version-list: $PKGS"
+          echo "all-package-version-list: $ALL_PKGS"
+          if [ "$CACHE_HIT" != "true" ] && [ "$CACHE_HIT" != "false" ]; then
+            echo "FAIL: cache-hit must be true or false"
+            exit 1
+          fi
+          if ! echo "$PKGS" | grep -qE '^tree(:[a-z0-9]+)?=[^,]+$'; then
+            echo "FAIL: expected package-version-list to be 'tree=<version>'"
+            exit 1
+          fi
+          if ! echo ",$ALL_PKGS," | grep -qF ",$PKGS,"; then
+            echo "FAIL: all-package-version-list should contain $PKGS"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert package is installed
+        run: |
+          if ! command -v tree >/dev/null 2>&1; then
+            echo "FAIL: tree binary not found"
+            exit 1
+          fi
+          tree --version
+          echo "PASS"

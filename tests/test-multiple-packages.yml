@@ -1,0 +1,69 @@
+name: Test multiple packages with custom version
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Build action bundle from its own source (dist is not committed at this tag)
+        run: |
+          if [ -f dist/action/index.js ]; then
+            echo "dist/action/index.js already present"
+            exit 0
+          fi
+          npm ci --ignore-scripts --no-audit --no-fund
+          npx tsc -p tsconfig.build.json
+          npx rollup -c rollup.config.mjs
+          test -f dist/action/index.js || { echo "FAIL: bundle not produced"; exit 1; }
+      - name: Pre-install aria2 (the action's apt backend expects it; the act image lacks it)
+        run: |
+          SUDO=""
+          if [ "$(id -u)" != "0" ]; then SUDO="sudo"; fi
+          if ! dpkg-query -W aria2 >/dev/null 2>&1; then
+            $SUDO apt-get update -y
+            $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends aria2
+          fi
+          dpkg-query -W aria2
+      - name: Ensure a cache service URL is advertised (act runs without one)
+        run: |
+          # @actions/cache isFeatureAvailable() only checks ACTIONS_CACHE_URL is set.
+          # Under act it is unset, so the action refuses to save. Keep any real value;
+          # otherwise point at an unreachable endpoint so restore/save fail softly.
+          if [ -z "${ACTIONS_CACHE_URL:-}" ]; then
+            echo "ACTIONS_CACHE_URL=http://127.0.0.1:1/" >> "$GITHUB_ENV"
+          fi
+          if [ -z "${ACTIONS_RUNTIME_TOKEN:-}" ]; then
+            echo "ACTIONS_RUNTIME_TOKEN=act-placeholder" >> "$GITHUB_ENV"
+          fi
+      - id: action
+        uses: .
+        with:
+          packages: "tree   rolldice"
+          version: multi-test-1
+      - name: Assert outputs
+        env:
+          PKGS: ${{ steps.action.outputs.package-version-list }}
+          ALL_PKGS: ${{ steps.action.outputs.all-package-version-list }}
+        run: |
+          echo "package-version-list: $PKGS"
+          echo "all-package-version-list: $ALL_PKGS"
+          if ! echo "$PKGS" | grep -qE '^rolldice(:[a-z0-9]+)?=[^,]+,tree(:[a-z0-9]+)?=[^,]+$'; then
+            echo "FAIL: expected sorted 'rolldice=<v>,tree=<v>'"
+            exit 1
+          fi
+          for p in $(echo "$PKGS" | tr ',' ' '); do
+            if ! echo ",$ALL_PKGS," | grep -qF ",$p,"; then
+              echo "FAIL: $p missing from all-package-version-list"
+              exit 1
+            fi
+          done
+          echo "PASS"
+      - name: Assert packages are installed
+        run: |
+          command -v tree || { echo "FAIL: tree missing"; exit 1; }
+          if ! command -v rolldice >/dev/null 2>&1 && [ ! -x /usr/games/rolldice ]; then
+            echo "FAIL: rolldice missing"
+            exit 1
+          fi
+          echo "PASS"
