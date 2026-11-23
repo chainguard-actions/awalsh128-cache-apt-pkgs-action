@@ -1,0 +1,406 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import winston from "winston";
+import { Manifest, ManifestEntry } from "../src/manifest.js";
+import { CacheKey } from "../src/cache.js";
+import { ActionPackageNames } from "../src/packages.js";
+import {
+  CommandExecutionError,
+  PackageNotInstallableError,
+  createPackageManager,
+  createPackageName,
+} from "ts-apt";
+
+import { ActionRunner } from "../src/action.js";
+import { MANIFEST_INPUTS, MANIFEST_OUTPUTS } from "./manifest-fixtures.js";
+
+vi.mock("ts-apt", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("ts-apt")>();
+  return {
+    ...actual,
+    createPackageManager: vi.fn(),
+  };
+});
+
+const NATIVE_ARCH = "amd64";
+
+describe("ActionRunner", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.mocked(createPackageManager).mockReset();
+  });
+
+  function createRunner() {
+    const cache = {
+      loadAndRestore: vi.fn(),
+      archiveAndSave: vi.fn(),
+    };
+
+    const commandRunner = {
+      run: vi.fn(),
+    };
+
+    const logger = winston.createLogger({ silent: true });
+    return {
+      runner: new ActionRunner(cache as never, commandRunner as never, logger),
+      cache,
+      commandRunner,
+      logger,
+    };
+  }
+
+  it("returns cache-hit outputs when manifest is restored", async () => {
+    const { runner, cache } = createRunner();
+    const packageNames = ActionPackageNames.fromInput("curl git");
+    const cacheKey = new CacheKey("v1", "0", process.arch, packageNames);
+    const restored = new Manifest(new Date(), [], cacheKey, MANIFEST_INPUTS, MANIFEST_OUTPUTS);
+    cache.loadAndRestore.mockResolvedValue(restored);
+    vi.mocked(createPackageManager).mockResolvedValue({
+      getNativeArchitecture: vi.fn().mockResolvedValue(NATIVE_ARCH),
+    } as never);
+
+    const result = await runner.runAction({
+      packages: "curl git",
+      version: "v1",
+      executeInstallScripts: false,
+      emptyPackagesBehavior: "error",
+      debug: false,
+    });
+
+    expect(result.cacheHit).toBe(true);
+    expect(cache.archiveAndSave).not.toHaveBeenCalled();
+  });
+
+  it("runAction cache hit creates package manager without apt-fast", async () => {
+    const { runner, cache } = createRunner();
+    const packageNames = ActionPackageNames.fromInput("curl");
+    const cacheKey = new CacheKey("v1", "0", process.arch, packageNames);
+    cache.loadAndRestore.mockResolvedValue(
+      new Manifest(new Date(), [], cacheKey, MANIFEST_INPUTS, MANIFEST_OUTPUTS),
+    );
+    vi.mocked(createPackageManager).mockResolvedValue({
+      getNativeArchitecture: vi.fn().mockResolvedValue(NATIVE_ARCH),
+    } as never);
+
+    await runner.runAction({
+      packages: "curl",
+      version: "v1",
+      executeInstallScripts: false,
+      emptyPackagesBehavior: "error",
+      debug: false,
+    });
+
+    expect(vi.mocked(createPackageManager).mock.calls[0]?.[0]).toBe(false);
+  });
+
+  it("runAction cache miss archives installed packages with their files", async () => {
+    // Unlikely to have dpkg install scripts on the test host.
+    const installedPackage = createPackageName("test-pkg-not-real", "1.0.0");
+    // buildFileList keeps only files that exist, so use this test file.
+    const installedFile = import.meta.filename;
+    const { runner, cache } = createRunner();
+    cache.loadAndRestore.mockResolvedValue(undefined);
+    vi.mocked(createPackageManager).mockResolvedValue({
+      update: vi.fn().mockResolvedValue(0),
+      install: vi.fn().mockResolvedValue([{ name: installedPackage }]),
+      listAlternatives: vi.fn().mockResolvedValue([]),
+      listInstalledFiles: vi.fn().mockResolvedValue([installedFile]),
+      getNativeArchitecture: vi.fn().mockResolvedValue(NATIVE_ARCH),
+    } as never);
+
+    await runner.runAction({
+      packages: installedPackage.serialize(),
+      version: "v1",
+      executeInstallScripts: false,
+      emptyPackagesBehavior: "error",
+      debug: false,
+    });
+
+    expect(cache.archiveAndSave).toHaveBeenCalledTimes(1);
+    const [manifest] = cache.archiveAndSave.mock.calls[0]!;
+    expect(manifest.entries).toEqual([new ManifestEntry(installedPackage, [installedFile.slice(1)])]);
+  });
+
+  it("runAction cache miss with a requested package apt did not report archives every requested package", async () => {
+    // apt prints no Inst or Setting up line for a package that is already installed at the requested
+    // version, so install() leaves it out. It must still end up in the cache (see issue #230).
+    const reportedPackage = createPackageName("test-pkg-reported", "1.0.0");
+    const unreportedPackage = createPackageName("test-pkg-already-installed", "1.0.0");
+    const { runner, cache } = createRunner();
+    cache.loadAndRestore.mockResolvedValue(undefined);
+    vi.mocked(createPackageManager).mockResolvedValue({
+      update: vi.fn().mockResolvedValue(0),
+      install: vi.fn().mockResolvedValue([{ name: reportedPackage }]),
+      listInstalled: vi.fn().mockResolvedValue([{ name: reportedPackage }, { name: unreportedPackage }]),
+      listAlternatives: vi.fn().mockResolvedValue([]),
+      listInstalledFiles: vi.fn().mockResolvedValue([]),
+      getNativeArchitecture: vi.fn().mockResolvedValue(NATIVE_ARCH),
+    } as never);
+    const packages = `${reportedPackage.serialize()} ${unreportedPackage.serialize()}`;
+
+    await runner.runAction({ ...MANIFEST_INPUTS, packages });
+
+    const [manifest] = cache.archiveAndSave.mock.calls[0]!;
+    expect(manifest.entries.map((entry: ManifestEntry) => entry.packageName)).toEqual([
+      reportedPackage,
+      unreportedPackage,
+    ]);
+  });
+
+  it("runAction cache miss records the alternatives a package registered, and no others", async () => {
+    const installedPackage = createPackageName("test-pkg-not-real", "1.0.0");
+    // buildFileList keeps only files that exist, so use this test file.
+    const installedFile = import.meta.filename;
+    const ownAlternative = {
+      name: "test-alternative",
+      link: "/usr/bin/test-alternative",
+      path: installedFile,
+      priority: 10,
+      slaves: [],
+    };
+    const otherAlternative = { ...ownAlternative, name: "other", path: "/usr/bin/not-this-package" };
+    const { runner, cache } = createRunner();
+    cache.loadAndRestore.mockResolvedValue(undefined);
+    vi.mocked(createPackageManager).mockResolvedValue({
+      update: vi.fn().mockResolvedValue(0),
+      install: vi.fn().mockResolvedValue([{ name: installedPackage }]),
+      listAlternatives: vi.fn().mockResolvedValue([ownAlternative, otherAlternative]),
+      listInstalledFiles: vi.fn().mockResolvedValue([installedFile]),
+      getNativeArchitecture: vi.fn().mockResolvedValue(NATIVE_ARCH),
+    } as never);
+
+    await runner.runAction({ ...MANIFEST_INPUTS, packages: installedPackage.serialize() });
+
+    const [manifest] = cache.archiveAndSave.mock.calls[0]!;
+    expect(manifest.entries[0]?.alternatives).toEqual([ownAlternative]);
+  });
+
+  it("runAction cache hit restores with a package manager that has no apt-fast", async () => {
+    const { runner, cache } = createRunner();
+    const packageNames = ActionPackageNames.fromInput("curl");
+    const cacheKey = new CacheKey("v1", "1", process.arch, packageNames);
+    cache.loadAndRestore.mockResolvedValue(
+      new Manifest(new Date(), [], cacheKey, MANIFEST_INPUTS, MANIFEST_OUTPUTS),
+    );
+    const restoreManager = { getNativeArchitecture: vi.fn().mockResolvedValue(NATIVE_ARCH) };
+    vi.mocked(createPackageManager).mockResolvedValue(restoreManager as never);
+
+    await runner.runAction({ ...MANIFEST_INPUTS, packages: "curl" });
+
+    expect(cache.loadAndRestore.mock.calls[0]?.[2]).toBe(restoreManager);
+  });
+
+  it("runAction cache miss saves the run's inputs and outputs in the manifest", async () => {
+    const installedPackage = createPackageName("test-pkg-not-real", "1.0.0");
+    const { runner, cache } = createRunner();
+    cache.loadAndRestore.mockResolvedValue(undefined);
+    vi.mocked(createPackageManager).mockResolvedValue({
+      update: vi.fn().mockResolvedValue(0),
+      install: vi.fn().mockResolvedValue([{ name: installedPackage }]),
+      listAlternatives: vi.fn().mockResolvedValue([]),
+      listInstalledFiles: vi.fn().mockResolvedValue([]),
+      getNativeArchitecture: vi.fn().mockResolvedValue(NATIVE_ARCH),
+    } as never);
+    const inputs = { ...MANIFEST_INPUTS, packages: installedPackage.serialize() };
+
+    const outputs = await runner.runAction(inputs);
+
+    const [manifest] = cache.archiveAndSave.mock.calls[0]!;
+    expect(manifest.inputs).toEqual(inputs);
+    expect(manifest.outputs).toEqual(outputs);
+  });
+
+  const COMMAND_FAILURE = { command: "apt-get", args: [], exitCode: 100, stdout: "", stderr: "" };
+
+  it.each([
+    [
+      "has no installation candidate and apt offers replacements",
+      { name: "python", reason: "no-installation-candidate", alternatives: ["python2", "python-is-python3"] },
+      "'python' has no installation candidate. Use one of these instead: python2, python-is-python3.",
+    ],
+    [
+      "has no installation candidate and nothing provides it",
+      { name: "python", reason: "no-installation-candidate", alternatives: [] },
+      "'python' has no installation candidate. It is virtual or obsolete and nothing provides it.",
+    ],
+    [
+      "was not found",
+      { name: "nonexistent", reason: "not-found", alternatives: [] },
+      "'nonexistent' was not found. Check the name for a typo",
+    ],
+  ] as const)(
+    "runAction cache miss with a package that %s fails with a clear message",
+    async (_, failed, expected) => {
+      const { runner, cache } = createRunner();
+      cache.loadAndRestore.mockResolvedValue(undefined);
+      const cause = new PackageNotInstallableError(COMMAND_FAILURE, [failed]);
+      vi.mocked(createPackageManager).mockResolvedValue({
+        update: vi.fn().mockResolvedValue(0),
+        install: vi.fn().mockRejectedValue(cause),
+        getNativeArchitecture: vi.fn().mockResolvedValue(NATIVE_ARCH),
+      } as never);
+
+      const failure = runner.runAction({ ...MANIFEST_INPUTS, packages: failed.name });
+
+      await expect(failure).rejects.toThrow(expected);
+      await expect(failure).rejects.toThrow("Fix the packages input.");
+      await expect(failure).rejects.toHaveProperty("cause", cause);
+      expect(cache.archiveAndSave).not.toHaveBeenCalled();
+    },
+  );
+
+  it("runAction cache miss with an install failure that is not a package problem rethrows it", async () => {
+    const { runner, cache } = createRunner();
+    cache.loadAndRestore.mockResolvedValue(undefined);
+    const failure = new CommandExecutionError(COMMAND_FAILURE);
+    vi.mocked(createPackageManager).mockResolvedValue({
+      update: vi.fn().mockResolvedValue(0),
+      install: vi.fn().mockRejectedValue(failure),
+      getNativeArchitecture: vi.fn().mockResolvedValue(NATIVE_ARCH),
+    } as never);
+
+    await expect(runner.runAction({ ...MANIFEST_INPUTS, packages: "curl" })).rejects.toBe(failure);
+  });
+
+  it("runAction cache miss refreshes the apt index before installing", async () => {
+    const { runner, cache } = createRunner();
+    cache.loadAndRestore.mockResolvedValue(undefined);
+    const update = vi.fn().mockResolvedValue(0);
+    const install = vi.fn().mockResolvedValue([]);
+    vi.mocked(createPackageManager).mockResolvedValue({
+      update,
+      install,
+      listInstalled: vi.fn().mockResolvedValue([]),
+      listAlternatives: vi.fn().mockResolvedValue([]),
+      getNativeArchitecture: vi.fn().mockResolvedValue(NATIVE_ARCH),
+    } as never);
+
+    await runner.runAction({
+      packages: "curl",
+      version: "v1",
+      executeInstallScripts: false,
+      emptyPackagesBehavior: "error",
+      debug: false,
+    });
+
+    expect(update.mock.invocationCallOrder[0]).toBeLessThan(install.mock.invocationCallOrder[0]!);
+  });
+
+  it("runAction cache miss logs how long each install step took", async () => {
+    const { runner, cache, logger } = createRunner();
+    cache.loadAndRestore.mockResolvedValue(undefined);
+    const infoSpy = vi.spyOn(logger, "info");
+    vi.mocked(createPackageManager).mockResolvedValue({
+      update: vi.fn().mockResolvedValue(0),
+      install: vi.fn().mockResolvedValue([]),
+      listInstalled: vi.fn().mockResolvedValue([]),
+      listAlternatives: vi.fn().mockResolvedValue([]),
+      getNativeArchitecture: vi.fn().mockResolvedValue(NATIVE_ARCH),
+    } as never);
+
+    await runner.runAction({
+      packages: "curl",
+      version: "v1",
+      executeInstallScripts: false,
+      emptyPackagesBehavior: "error",
+      debug: false,
+    });
+
+    const messages = infoSpy.mock.calls.map(([message]) => String(message));
+    expect(
+      [
+        "Cache restore",
+        "apt update",
+        "apt install",
+        "Listing alternatives",
+        "Listing installed files",
+        "Archive and cache save",
+      ].map((step) => messages.some((message) => new RegExp(`^${step} took \\d+\\.\\ds$`).test(message))),
+    ).toEqual([true, true, true, true, true, true]);
+  });
+
+  describe("input validation", () => {
+    const INPUTS = {
+      packages: "curl",
+      version: "v1",
+      executeInstallScripts: false,
+      emptyPackagesBehavior: "error",
+      debug: false,
+    } as const;
+    const EMPTY_LISTS = [
+      ["an empty string", ""],
+      ["only whitespace", "   "],
+      ["only separators", " , \\ , "],
+    ] as const;
+
+    it.each(EMPTY_LISTS)("runAction %s with the error behavior throws", async (_case, packages) => {
+      const { runner } = createRunner();
+
+      await expect(runner.runAction({ ...INPUTS, packages })).rejects.toThrow("Packages argument is empty.");
+    });
+
+    it.each(EMPTY_LISTS)(
+      "runAction %s with the warn behavior warns and returns empty outputs",
+      async (_case, packages) => {
+        const { runner, cache, logger } = createRunner();
+        const warnSpy = vi.spyOn(logger, "warn");
+
+        const outputs = await runner.runAction({ ...INPUTS, packages, emptyPackagesBehavior: "warn" });
+
+        expect(outputs).toEqual({ cacheHit: false, packageVersionList: "", allPackageVersionList: "" });
+        expect(warnSpy).toHaveBeenCalledWith("Packages argument is empty.");
+        expect(cache.loadAndRestore).not.toHaveBeenCalled();
+        expect(createPackageManager).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(EMPTY_LISTS)(
+      "runAction %s with the ignore behavior returns empty outputs silently",
+      async (_case, packages) => {
+        const { runner, cache, logger } = createRunner();
+        const warnSpy = vi.spyOn(logger, "warn");
+
+        const outputs = await runner.runAction({ ...INPUTS, packages, emptyPackagesBehavior: "ignore" });
+
+        expect(outputs).toEqual({ cacheHit: false, packageVersionList: "", allPackageVersionList: "" });
+        expect(warnSpy).not.toHaveBeenCalled();
+        expect(cache.loadAndRestore).not.toHaveBeenCalled();
+        expect(createPackageManager).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(["123 abc", " leading", "trailing ", "a b c"])(
+      "runAction version %j with a space throws",
+      async (version) => {
+        const { runner, cache } = createRunner();
+
+        await expect(runner.runAction({ ...INPUTS, version })).rejects.toThrow(
+          `Version value '${version}' cannot contain spaces.`,
+        );
+        expect(cache.loadAndRestore).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  it("runAction cache hit does not refresh the apt index", async () => {
+    const { runner, cache } = createRunner();
+    const cacheKey = new CacheKey("v1", "0", process.arch, ActionPackageNames.fromInput("curl"));
+    cache.loadAndRestore.mockResolvedValue(
+      new Manifest(new Date(), [], cacheKey, MANIFEST_INPUTS, MANIFEST_OUTPUTS),
+    );
+    const update = vi.fn();
+    vi.mocked(createPackageManager).mockResolvedValue({
+      update,
+      getNativeArchitecture: vi.fn().mockResolvedValue(NATIVE_ARCH),
+    } as never);
+
+    await runner.runAction({
+      packages: "curl",
+      version: "v1",
+      executeInstallScripts: false,
+      emptyPackagesBehavior: "error",
+      debug: false,
+    });
+
+    expect(update).not.toHaveBeenCalled();
+  });
+});

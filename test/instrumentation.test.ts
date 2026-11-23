@@ -1,0 +1,164 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { Artifacts, Instruments } from "../src/instrumentation.ts";
+import * as core from "@actions/core";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("@actions/core", () => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warning: vi.fn(),
+  error: vi.fn(),
+}));
+
+describe("instrumentation", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  const ARTIFACT_FILENAMES = ["capa_app.log", "capa_exec.log", "cache_key.json", "manifest_all.json"];
+
+  describe("Artifacts", () => {
+    it("constructor initializes properties correctly", () => {
+      const dir = "/path/to/artifacts";
+      const debug = true;
+      const runId = "test-run-id";
+
+      const artifacts = new Artifacts(dir, ARTIFACT_FILENAMES, debug, runId);
+      expect(artifacts).toEqual({
+        dir: dir,
+        artifactFilenames: ARTIFACT_FILENAMES,
+        debug: debug,
+        runId: runId,
+      });
+    });
+
+    it("constructor generates a random runId when not provided", () => {
+      const dir = "/path/to/artifacts";
+      const debug = false;
+      // GitHub Actions sets this, so clear it to test the fallback.
+      vi.stubEnv("GITHUB_RUN_ID", undefined);
+
+      const artifacts = new Artifacts(dir, ARTIFACT_FILENAMES, debug);
+      expect(artifacts.runId).toMatch(/^ghrunid-notfound-/);
+    });
+
+    it("name in a workflow step includes attempt, job and step", () => {
+      vi.stubEnv("GITHUB_RUN_ATTEMPT", "2");
+      vi.stubEnv("GITHUB_JOB", "list_versions");
+      vi.stubEnv("GITHUB_ACTION", "execute");
+
+      const artifacts = new Artifacts("/dir", ARTIFACT_FILENAMES, false, "123");
+
+      expect(artifacts.name).toBe("capa_artifacts-123-2-list_versions-execute");
+    });
+  });
+
+  describe("Instruments", () => {
+    const CACHE_DIRNAME = "cache-apt-pkgs";
+
+    it("constructor cache dir missing creates it under home with the logs", async () => {
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), "instruments-test-"));
+      vi.stubEnv("HOME", home);
+      const expectedDir = path.join(home, CACHE_DIRNAME);
+
+      const instruments = new Instruments(CACHE_DIRNAME, false);
+      instruments.appLogger.info("app message");
+      await new Promise((resolve) => instruments.appLogger.end(resolve));
+
+      expect(instruments.cacheDirPath).toBe(expectedDir);
+      expect(instruments.artifacts.dir).toBe(expectedDir);
+      await vi.waitFor(() =>
+        expect(fs.readFileSync(path.join(expectedDir, "capa_app.log"), "utf8")).toContain("app message"),
+      );
+      fs.rmSync(home, { recursive: true, force: true });
+    });
+
+    /** Runs `work` against fresh instruments, then closes their log files before removing them. */
+    async function withInstruments(
+      work: (instruments: Instruments) => void,
+      debug: boolean = false,
+    ): Promise<void> {
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), "instruments-test-"));
+      vi.stubEnv("HOME", home);
+      const instruments = new Instruments(CACHE_DIRNAME, debug);
+      work(instruments);
+      // The log files open asynchronously; removing the directory first makes the open fail.
+      await vi.waitFor(() => {
+        expect(fs.existsSync(path.join(instruments.cacheDirPath, "capa_app.log"))).toBe(true);
+        expect(fs.existsSync(path.join(instruments.cacheDirPath, "capa_exec.log"))).toBe(true);
+      });
+      await Promise.all(
+        [instruments.appLogger, instruments.execLogger].map(
+          (logger) => new Promise((resolve) => logger.end(resolve)),
+        ),
+      );
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+
+    it.each([
+      ["info", core.info],
+      ["warn", core.warning],
+      ["error", core.error],
+    ] as const)("appLogger %s message reaches the workflow log", async (level, workflowLogFn) => {
+      await withInstruments((instruments) => instruments.appLogger.log(level, "to the workflow log"));
+
+      expect(workflowLogFn).toHaveBeenCalledWith("to the workflow log");
+    });
+
+    it("appLogger debug message with debug on is written to the workflow log as debug", async () => {
+      await withInstruments((instruments) => instruments.appLogger.debug("shown in step debug"), true);
+
+      expect(core.debug).toHaveBeenCalledWith("shown in step debug");
+    });
+
+    it("appLogger message at a level without a workflow log equivalent is written as an error", async () => {
+      await withInstruments((instruments) => instruments.appLogger.log("http", "odd level"), true);
+
+      expect(core.error).toHaveBeenCalledWith("[UNKNOWN LEVEL]: http, message: odd level");
+    });
+
+    it("appLogger debug message with debug off is not written to the workflow log", async () => {
+      await withInstruments((instruments) => instruments.appLogger.debug("hidden"));
+
+      expect(core.debug).not.toHaveBeenCalledWith("hidden");
+    });
+  });
+
+  // describe("Instruments", () => {
+  //   it("constructor initializes properties correctly", () => {
+  //     const cacheDir = "/path/to/cache";
+  //     const debug = true;
+  //     const artifacts = new Artifacts(
+  //       "/path/to/cache",
+  //       ARTIFACT_FILENAMES,
+  //       debug,
+  //     );
+
+  //     const instruments = new Instruments(cacheDir, debug, artifacts);
+  //     expect(instruments).toEqual({
+  //       cacheDir: cacheDir,
+  //       debug: debug,
+  //       artifacts: artifacts,
+  //       appLogger: expect.toBeTypeOf("object"),
+  //       execLogger: expect.toBeTypeOf("object"),
+  //     });
+  //   });
+
+  //   it("constructor initializes artifacts when not provided", () => {
+  //     const cacheDir = "/path/to/cache";
+  //     const debug = false;
+
+  //     const instruments = new Instruments(cacheDir, debug);
+  //     expect(instruments).toEqual({
+  //       cacheDir: cacheDir,
+  //       debug: debug,
+  //       artifacts: expect.toBeTypeOf("object"),
+  //       appLogger: expect.toBeTypeOf("object"),
+  //       execLogger: expect.toBeTypeOf("object"),
+  //     });
+  //   });
+  // });
+});

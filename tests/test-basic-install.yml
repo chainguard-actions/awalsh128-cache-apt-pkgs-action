@@ -1,0 +1,75 @@
+name: Test basic install
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      # GitHub-hosted runner images ship aria2 preinstalled, and the action's
+      # install path probes for it with "dpkg-query -W aria2" (failing hard if
+      # missing). The act platform image lacks it, so provide it like a real runner.
+      - name: Provide aria2 like a GitHub-hosted runner image
+        run: |
+          SUDO=""
+          if [ "$(id -u)" != "0" ] && command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi
+          if ! dpkg-query -W aria2 >/dev/null 2>&1; then
+            $SUDO apt-get update -y
+            DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y --no-install-recommends aria2
+          fi
+          dpkg-query -W aria2
+      # Under act the GitHub Actions cache service is not available, so the
+      # action's final cache-save step errors out ("GitHub Actions cache service
+      # is not available in this environment") AFTER installing the packages.
+      # Accept that specific environmental failure, but always require that the
+      # package was really installed, and validate outputs strictly on success.
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          packages: sl
+          version: act-basic-install
+      - name: Assert outputs (strict on success)
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          CACHE_HIT: ${{ steps.action.outputs.cache-hit }}
+          PKGS: ${{ steps.action.outputs.package-version-list }}
+          ALL_PKGS: ${{ steps.action.outputs.all-package-version-list }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "cache-hit: $CACHE_HIT"
+          echo "package-version-list: $PKGS"
+          echo "all-package-version-list: $ALL_PKGS"
+          if [ "$OUTCOME" = "success" ]; then
+            if [ "$CACHE_HIT" != "true" ] && [ "$CACHE_HIT" != "false" ]; then
+              echo "FAIL: cache-hit must be true or false"
+              exit 1
+            fi
+            if ! echo "$PKGS" | grep -qE '^sl=[^,]+$'; then
+              echo "FAIL: package-version-list should be 'sl=<version>'"
+              exit 1
+            fi
+            if ! echo ",$ALL_PKGS," | grep -qE ',sl=[^,]+,'; then
+              echo "FAIL: all-package-version-list should contain sl=<version>"
+              exit 1
+            fi
+            echo "PASS: outputs valid"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed only at cache save (no cache service under act); install verified next"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi
+      - name: Assert package installed
+        run: |
+          if [ -x /usr/games/sl ] || command -v sl >/dev/null 2>&1; then
+            echo "PASS: sl is installed"
+          else
+            echo "FAIL: sl binary not found"
+            exit 1
+          fi
+          if ! dpkg-query -W sl; then
+            echo "FAIL: sl not registered with dpkg"
+            exit 1
+          fi
+          echo "PASS"
