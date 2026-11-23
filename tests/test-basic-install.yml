@@ -1,0 +1,65 @@
+name: Test basic package install
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      # GitHub-hosted ubuntu runner images ship aria2 preinstalled, and the
+      # action's apt-fast probe runs `dpkg-query -W aria2`. The act platform
+      # image does not include it, so install it here to match a real runner.
+      - name: Prepare runner (install aria2 like hosted runner images)
+        run: |
+          SUDO=""
+          if [ "$(id -u)" != "0" ] && command -v sudo >/dev/null 2>&1; then
+            SUDO="sudo"
+          fi
+          export DEBIAN_FRONTEND=noninteractive
+          $SUDO apt-get update -y
+          $SUDO apt-get install -y --no-install-recommends aria2
+          dpkg-query -W aria2
+      # The install happens before the cache save. The cache service under act
+      # may not be compatible with @actions/cache, so the save (and therefore the
+      # step) may fail. The package must be installed either way.
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          packages: rolldice
+          version: act-test-basic
+      - name: Assert package installed and outputs valid
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          CACHE_HIT: ${{ steps.action.outputs.cache-hit }}
+          PKGS: ${{ steps.action.outputs.package-version-list }}
+          ALL_PKGS: ${{ steps.action.outputs.all-package-version-list }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "cache-hit: $CACHE_HIT"
+          echo "package-version-list: $PKGS"
+          echo "all-package-version-list: $ALL_PKGS"
+          if ! dpkg -s rolldice >/dev/null 2>&1 && [ ! -x /usr/games/rolldice ]; then
+            echo "FAIL: rolldice was not installed"
+            exit 1
+          fi
+          if [ "$OUTCOME" = "success" ]; then
+            if [ "$CACHE_HIT" != "false" ] && [ "$CACHE_HIT" != "true" ]; then
+              echo "FAIL: cache-hit should be a boolean"
+              exit 1
+            fi
+            if ! echo "$PKGS" | grep -qE '^rolldice=.+'; then
+              echo "FAIL: package-version-list should contain rolldice=<version>"
+              exit 1
+            fi
+            if ! echo "$ALL_PKGS" | grep -qE '(^|,)rolldice='; then
+              echo "FAIL: all-package-version-list should contain rolldice"
+              exit 1
+            fi
+            echo "PASS: installed and outputs valid"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: package installed (cache save unavailable under act)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi
