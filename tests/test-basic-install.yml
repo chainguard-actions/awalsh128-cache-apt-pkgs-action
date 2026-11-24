@@ -1,0 +1,88 @@
+name: Test basic package install (cache miss)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      # On a cache miss the action checks for apt-fast, which runs
+      # `dpkg-query -W aria2`. If aria2 is missing, the action fails.
+      # GitHub-hosted runners include aria2. The act image does not, so install it first.
+      - name: Prepare runner (install aria2 like hosted runners)
+        run: |
+          SUDO=""
+          if [ "$(id -u)" != "0" ] && command -v sudo >/dev/null 2>&1; then
+            SUDO="sudo"
+          fi
+          export DEBIAN_FRONTEND=noninteractive
+          $SUDO apt-get update -y
+          $SUDO apt-get install -y --no-install-recommends aria2
+          dpkg-query -W aria2
+      - name: Ensure tree is not preinstalled
+        run: |
+          if command -v tree >/dev/null 2>&1; then
+            SUDO=""
+            if [ "$(id -u)" != "0" ] && command -v sudo >/dev/null 2>&1; then
+              SUDO="sudo"
+            fi
+            $SUDO apt-get remove -y tree || true
+          fi
+          if command -v tree >/dev/null 2>&1; then
+            echo "WARN: tree still present before action"
+          fi
+      # The action installs the packages and then saves them to the
+      # GitHub Actions cache. act has no cache service that works here, so the
+      # save step can fail with "cache service is not available". That error
+      # comes after the install, so the test accepts a failed step but still
+      # requires the package to be installed. If the step succeeds, the
+      # outputs must be valid.
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          packages: tree
+          version: basic-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Assert outcome and outputs
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          CACHE_HIT: ${{ steps.action.outputs.cache-hit }}
+          PKGS: ${{ steps.action.outputs.package-version-list }}
+          ALL_PKGS: ${{ steps.action.outputs.all-package-version-list }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "cache-hit: $CACHE_HIT"
+          echo "package-version-list: $PKGS"
+          echo "all-package-version-list: $ALL_PKGS"
+          if [ "$OUTCOME" = "success" ]; then
+            if [ "$CACHE_HIT" != "false" ]; then
+              echo "FAIL: expected cache-hit 'false' on first install"
+              exit 1
+            fi
+            if ! echo "$PKGS" | grep -qE '^tree=[^,]+$'; then
+              echo "FAIL: expected package-version-list 'tree=<version>'"
+              exit 1
+            fi
+            if ! echo ",$ALL_PKGS,; " | grep -qE ',tree=[^,]+,'; then
+              echo "FAIL: expected all-package-version-list to include tree"
+              exit 1
+            fi
+            echo "PASS: action succeeded with valid outputs"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed at cache save (no cache service under act); install is checked next"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi
+      - name: Assert package installed
+        run: |
+          if ! command -v tree >/dev/null 2>&1; then
+            echo "FAIL: tree binary not found"
+            exit 1
+          fi
+          if ! dpkg-query -W tree; then
+            echo "FAIL: tree not registered with dpkg"
+            exit 1
+          fi
+          tree --version
+          echo "PASS"

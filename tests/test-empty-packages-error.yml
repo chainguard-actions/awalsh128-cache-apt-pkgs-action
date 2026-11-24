@@ -1,0 +1,29 @@
+name: Test empty packages with default error behavior
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          packages: ""
+      - name: Assert action failed
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          CACHE_HIT: ${{ steps.action.outputs.cache-hit }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "cache-hit: '$CACHE_HIT'"
+          if [ "$OUTCOME" != "failure" ]; then
+            echo "FAIL: expected failure for empty package list with default 'error' behavior"
+            exit 1
+          fi
+          if [ -n "$CACHE_HIT" ]; then
+            echo "FAIL: no outputs expected on failure"
+            exit 1
+          fi
+          echo "PASS"

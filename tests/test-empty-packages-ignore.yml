@@ -1,0 +1,37 @@
+name: Test empty packages with ignore behavior
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          packages: ""
+          empty_packages_behavior: ignore
+      - name: Assert outputs are empty and no cache hit
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          CACHE_HIT: ${{ steps.action.outputs.cache-hit }}
+          PKGS: ${{ steps.action.outputs.package-version-list }}
+          ALL_PKGS: ${{ steps.action.outputs.all-package-version-list }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "cache-hit: $CACHE_HIT"
+          echo "package-version-list: '$PKGS'"
+          echo "all-package-version-list: '$ALL_PKGS'"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          if [ "$CACHE_HIT" != "false" ]; then
+            echo "FAIL: expected cache-hit 'false'"
+            exit 1
+          fi
+          if [ -n "$PKGS" ] || [ -n "$ALL_PKGS" ]; then
+            echo "FAIL: expected empty package lists"
+            exit 1
+          fi
+          echo "PASS"
